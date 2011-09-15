@@ -5,6 +5,10 @@
 # This utility reports the current configuration version and may
 # also be used to check whether a given version number exists in
 # the database.
+#
+# Optionally, it will also dump the configuration keys and values for
+# the given version (or latest, if no version is specified).
+#
 
 use strict;
 use warnings;
@@ -14,19 +18,83 @@ use Getopt::Long;
 
 my $opt_version;
 my $opt_dbpath;
+my $opt_format;
 
-my $result = GetOptions( 'dbpath=s' => \$opt_dbpath, 'version=s' => \$opt_version );
+my $help = <<EOF;
+cfgver - Config::Versioned cli
+
+This command accesses the internal configuration repository used by the
+Config::Versioned module.
+
+SYNOPSIS
+
+    cfgver [options]
+
+    cfgver export [options] [KEY]
+
+OPTIONS
+
+dbpath  Name of directory containing internal config repository.
+        [default is cfgver.git]
+
+version Specific version identifier to retrieve.
+        [default is current version]
+
+format  Output format for dumping values. [not implemented]
+
+COMMANDS
+
+By default, the version identifier is displayed.
+
+The 'export' command causes the keys and values for the given version
+to be displayed. Optionally, a key may be specified, in which case
+only the values for that key are displayed.
+
+EOF
+
+my $result =
+  GetOptions( 'dbpath=s' => \$opt_dbpath, 'version=s' => \$opt_version, 'format=s' => \$opt_format );
+
+my $command = 'version';
+
+if (@ARGV) {
+    $command = shift @ARGV;
+}
 
 if ( not $opt_dbpath ) {
     die "Error: dbpath must be specified\n";
 }
 
 my @params = ( dbpath => $opt_dbpath );
+if ($opt_version) {
+    push @params, version => $opt_version;
+}
 
-my $cfg = Config::Versioned->new( { @params } );
+my $cfg = Config::Versioned->new( {@params} );
 if ( not $cfg ) {
     die "Error: unable to create Config::Versioned object: $@";
 }
 
-print $cfg->version( $opt_version ), "\n";
+if ( $command eq 'version' ) {
+    print $cfg->version($opt_version), "\n";
+}
+elsif ( $command eq 'export' ) {
+    my $key = shift @ARGV;
+
+    if ( $key ) {
+        foreach my $val ( $cfg->get( $key ) ) {
+            print $val, "\n";
+        }
+    } else {
+        my $dump = $cfg->dumptree($opt_version);
+
+        foreach my $key ( sort keys %{$dump} ) {
+            print $key, ':  ', $dump->{$key}, "\n";
+        }
+    }
+
+}
+else {
+    die "Error: unknown command '$command'\n";
+}
 

@@ -18,11 +18,11 @@ Config::Versioned - Simple, versioned access to configuration data
 
 =head1 VERSION
 
-Version 0.01
+Version 0.02
 
 =cut
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 use Carp;
 use Config::Std;
@@ -31,13 +31,18 @@ use DateTime;
 use Git::PurePerl;
 use Path::Class;
 
-my $delimiter = '.';    # NOTE: in the regexes, the dot is hardcoded
-my $debug     = 0;
+my $delimiter   = '.';
+my $delimiter_regex = qr/ \. /xms;
 
 # a reference to the singleton Config::Versioned object that parsed the command line
 my ($default_option_processor);
 
 my (%path_is_secure);
+
+my $debug = 0;
+if ( defined $ENV{CONFIG_VERSIONED_DEBUG} ) {
+    $debug = $ENV{CONFIG_VERSIONED_DEBUG};
+}
 
 =head1 SYNOPSIS
 
@@ -142,6 +147,17 @@ Note: this option might become deprecated. I just wanted some extra
 This sets the time to use for the commits in the internal git repository.
 It is used for debugging purposes only!
 
+=item delimiter
+
+Specifies the delimiter used to separate the different levels in the
+string used to designate the location of a configuration parameter. [Default: '.']
+
+=item delimiter_regex
+
+Specifies the delimiter used to separate the different levels in the
+string used to designate the location of a configuration parameter.
+[Default: qr/ \. /xms]
+
 =back
 
 =head2 new( { PARAMS } )
@@ -188,7 +204,9 @@ sub new {
     }
 
     if ( not defined $Config::Versioned::git ) {
-        $self->_init_repo($init_args);
+        if ( not $self->_init_repo($init_args) ) {
+            return;
+        }
     }
 
     my $cfghash = $self->parser($init_args);
@@ -243,10 +261,79 @@ sub get {
     if ( $obj->kind eq 'blob' ) {
         return $obj->content;
     }
+    elsif ( $obj->kind eq 'tree' ) {
+        my @entries = $obj->directory_entries;
+        my @ret     = ();
+        foreach my $de (@entries) {
+            push @ret, $de->filename;
+        }
+        return
+          sort { ( $a =~ /^\d+$/ and $b =~ /^\d+$/ ) ? $a <=> $b : $a cmp $b }
+          @ret;
+    }
     else {
-        warn "# DEBUG: get() was asked to return a non-blob object\n";
+        warn "# DEBUG: get() was asked to return a non-blob object [kind=",
+          $obj->kind, "]\n";
         return;
     }
+}
+
+=head2 kind ( LOCATION [, VERSION ] )
+
+The get() method tries to return a scalar when the location corresponds
+to a single value and a list when the location has child nodes. Sometimes,
+however, it is helpful to have a definitive answer on what a location 
+contains. 
+
+The kind() method returns the object type that the given location accesses.
+This can be one of the following values:
+
+=over
+
+=item tree
+
+The given location contains a tree object containing zero or more child 
+objects. The get() method will return a list of the entry names.
+
+=item blob
+
+The data node that usually contains a scalar value, but in future implementations
+may contain other encoded data.
+
+=back
+
+B<Note:> As a side-effect, this can be used to test whether the given location
+exists at all in the configuration. If not found, C<undef> is returned.
+
+=cut
+
+sub kind {
+    my $self     = shift;
+    my $location = shift;
+    my $version  = shift;
+
+    if ( $self->{prefix} ) {
+        $location = $self->{prefix} . $delimiter . $location;
+    }
+    my $obj = $self->_findobj( $location, $version );
+
+    if ( not defined $obj ) {
+        return;    # if nothing found, just return undef
+    }
+
+    if ( $obj->kind eq 'blob' ) {
+        return 'blob';
+    }
+    elsif ( $obj->kind eq 'tree' ) {
+        return 'tree';
+    }
+    else {
+        $@ = "Internal object error (expected tree or blob): [gpp kind="
+          . $obj->kind . "]\n";
+        warn "# DEBUG: " . $@;
+        return;
+    }
+
 }
 
 =head2 listattr( LOCATION [, VERSION ] )
@@ -318,23 +405,26 @@ sub dumptree {
         $obj = $obj->tree;
     }
 
-    my $ret = ();
+    my $ret = {};
 
     my @directory_entries = $obj->directory_entries;
 
     foreach my $de (@directory_entries) {
         my $child = $cfg->get_object( $de->sha1 );
-#        warn "DEBUG: dump - child name = ", $de->filename, "\n";
-#        warn "DEBUG: dump - child kind = ", $child->kind, "\n";
+
+        #        warn "DEBUG: dump - child name = ", $de->filename, "\n";
+        #        warn "DEBUG: dump - child kind = ", $child->kind, "\n";
 
         if ( $child->kind eq 'tree' ) {
-            my $subret = $self->dumptree($de->sha1);
-            foreach my $key ( keys %{ $subret } ) {
+            my $subret = $self->dumptree( $de->sha1 );
+            foreach my $key ( keys %{$subret} ) {
                 $ret->{ $de->filename . $delimiter . $key } = $subret->{$key};
             }
-        } elsif ( $child->kind eq 'blob' ) {
+        }
+        elsif ( $child->kind eq 'blob' ) {
             $ret->{ $de->filename } = $child->content;
-        } else {
+        }
+        else {
             die "ERROR: unexpected kind: ", $child->kind, "\n";
         }
 
@@ -362,18 +452,20 @@ value if it is found.
 =cut
 
 sub version {
-    my $self = shift;
+    my $self    = shift;
     my $version = shift;
-    my $cfg = $Config::Versioned::git;
+    my $cfg     = $Config::Versioned::git;
 
-    if ( $version ) {
+    if ($version) {
         my $obj = $cfg->get_object($version);
         if ( $obj and $obj->sha1 eq $version ) {
             return $version;
-        } else {
+        }
+        else {
             return;
         }
-    } else {
+    }
+    else {
         my $head = $cfg->head;
         return $head->sha1;
     }
@@ -430,6 +522,13 @@ sub _import {
             $init_args->{dbpath} = 'cfgver.git';
         }
 
+        if ( exists $init_args->{delimiter} ) {
+            $delimiter = $init_args->{delimiter};
+        }
+        if ( exists $init_args->{delimiter_regex} ) {
+            $delimiter_regex = $init_args->{delimiter_regex};
+        }
+
         $Config::Versioned::init_args = $init_args;
 
         #        my $option_processor = $class->new($init_args);
@@ -454,7 +553,10 @@ sub _init_repo {
     }
 
     if ( not -d $init_args->{dbpath} ) {
-        dir( $init_args->{dbpath} )->mkpath;
+        if ( not dir( $init_args->{dbpath} )->mkpath ) {
+            $@ = 'Error creating directory ' . $init_args->{dbpath} . ': ' . $!;
+            return;
+        }
         $git = Git::PurePerl->init( gitdir => $init_args->{dbpath} );
     }
     else {
@@ -550,7 +652,7 @@ sub parser {
 
         # build up the underlying branch for these leaves
 
-        my @sectpath = split( /\./, $sect );
+        my @sectpath = split( $delimiter_regex, $sect );
         my $sectref = $tmphash;
         foreach my $nodename (@sectpath) {
             $sectref->{$nodename} ||= {};
@@ -608,6 +710,10 @@ sub commit {
     #    warn "# author_name: ", $init_args->{author_name}, "\n";
     my $tree = $self->_hash2tree($hash);
 
+    if ($debug) {
+        print join( "\n# ", '', $self->_debugtree($tree) ), "\n";
+    }
+
     #
     # Now that we have a "staging" tree, compare its hash with
     # that of the current top-level tree. If they are the same,
@@ -616,7 +722,10 @@ sub commit {
     #
 
     if ( $parent and $master->tree->sha1 eq $tree->sha1 ) {
-        return;
+        if ($debug) {
+            carp("Nothing to commit (index matches HEAD)");
+        }
+        return $self;
     }
 
     #
@@ -654,11 +763,20 @@ sub _hash2tree {
     if ( ref($hash) ne 'HASH' ) {
         confess "ERR: _hash2tree() - arg not hash ref [$hash]";
     }
+    if ($debug) {
+        warn "Entered _hash2tree( $hash ): ", join( ', ', %{$hash} ), "\n";
+    }
 
     my @dir_entries = ();
 
     foreach my $key ( keys %{$hash} ) {
+        if ($debug) {
+            warn "# _hash2tree() processing $key -> ", $hash->{$key}, "\n";
+        }
         if ( ref( $hash->{$key} ) eq 'HASH' ) {
+            if ($debug) {
+                warn "# _hash2tree() adding subtree for $key\n";
+            }
             my $subtree = $self->_hash2tree( $hash->{$key} );
             my $de      = Git::PurePerl::NewDirectoryEntry->new(
                 mode     => '40000',
@@ -674,14 +792,39 @@ sub _hash2tree {
             my $de = Git::PurePerl::NewDirectoryEntry->new(
                 mode     => '100644',
                 filename => $key,
-                sha1     => => $obj->sha1,
+                sha1     => $obj->sha1,
             );
             push @dir_entries, $de;
         }
     }
     my $tree =
-      Git::PurePerl::NewObject::Tree->new(
-        directory_entries => [@dir_entries] );
+      Git::PurePerl::NewObject::Tree->new( directory_entries =>
+          [ sort { $a->filename cmp $b->filename } @dir_entries ] );
+
+#    my $sha1 = Digest::SHA->new();
+#    $sha1->add( $tree->raw() );
+#    my $test_sha1 = $sha1->hexdigest();
+#    if ( $test_sha1 ne $tree->sha1 ) {
+#        warn "WARNING: my sha1 $test_sha1; Git::PurePerl sha1 ", $tree->sha1, "\n";
+#    }
+#        if ( $test_sha1 eq 'c2b1cf11f2abf788bfef75bbdf0263c84c3eb058' or $test_sha1 eq 'deff7d65d491fe1291323a82080bb94d72577ac7' ) {
+#            warn "HEY!!!\n";
+#            warn hdump( $tree->raw ), "\n";
+#        }
+#    }
+
+    if ($debug) {
+        my $content = $tree->content;
+        $content =~ s/(.)/sprintf("%x",ord($1))/eg;
+        warn "# Added tree with dir entries: ",
+          join( ', ', map { $_->filename } @dir_entries ), "\n";
+        warn "#     content: ", $content, "\n";
+        warn "#     size: ", $tree->size, "\n";
+        warn "#     kind: ", $tree->kind, "\n";
+        warn "#     sha1: ", $tree->sha1, "\n";
+
+    }
+
     $Config::Versioned::git->put_object($tree);
 
     return $tree;
@@ -699,7 +842,7 @@ sub _mknode {
     my $self     = shift;
     my $location = shift;
     my $ref      = $Config::Versioned::git;
-    foreach my $key ( split( /\./, $location ) ) {
+    foreach my $key ( split( $delimiter_regex, $location ) ) {
         if ( not exists $ref->{$key} ) {
             $ref->{$key} = {};
         }
@@ -758,7 +901,7 @@ sub _findobj {
     if ( $obj->kind eq 'commit' ) {
         $obj = $obj->tree;
     }
-    my @keys = split /\./, $location;
+    my @keys = split $delimiter_regex, $location;
 
     # iterate thru the levels in the location
 
@@ -807,7 +950,7 @@ sub _get_sect_key {
     # Config::Std uses section/key, so we need to split up the
     # given key
 
-    my @tokens = split( /\./, $key );
+    my @tokens = split( $delimiter_regex, $key );
     $key = pop @tokens;
     my $sect = join( $delimiter, @tokens );
 
@@ -867,6 +1010,184 @@ sub _read_config_path {
     }
 
     read_config( $cfgfile => %{$cfgref} );
+}
+
+=head2 _debugtree( OBJREF | SHA1 )
+
+This fetches the entire tree for the given SHA1 and dumps it in a
+human-readable format.
+
+=cut
+
+sub _debugtree {
+    my $self   = shift;
+    my $start  = shift;
+    my $indent = shift || 0;
+    my $cfg    = $Config::Versioned::git;
+    my @out    = ();
+
+    my $tabsize = 2;
+    my $obj;
+
+    if ($debug) {
+
+        #        warn "# Entered _debugtree( $start, ", $indent || 0, ")\n";
+    }
+
+    # Soooo, let's see what we've been fed...
+
+    if ( not $start ) {    # default to the HEAD of master
+        if ( $cfg->all_sha1s->all ) {
+            my $master = $cfg->ref('refs/heads/master');
+            if ( not $master ) {
+                die "ERR: no master object found";
+            }
+            $obj = $cfg->get_object( $master->sha1 );
+        }
+        else {
+            push @out, "NO SHA1s IN TREE";
+            return @out;    # if no sha1s are in repo, there's nothing to return
+        }
+
+    }
+    elsif ( not ref($start) ) {    # possibly a sha1
+        $obj = $cfg->get_object($start);
+        if ( not $obj ) {
+            $@ = "No object found for SHA1 " . $start ? $start : '';
+            return $@;
+        }
+    }
+    elsif ( ref($start) =~ /^(REF|SCALAR|ARRAY|HASH|CODE|GLOB)$/ ) {
+        croak( "_debugtree doesn't support ref type " . ref($start) );
+    }
+    else {
+        $obj = $start;
+    }
+
+    # At this point, we should have a Git::PurePerl (new) Object.
+    # Let's double-check.
+
+    if ( $obj->can('kind') ) {
+
+        #        push @out, ( ' ' x ( $tabsize * $indent ) ) . ('=' x 40);
+        #foreach my $attr (qw( kind size content sha1 git )) {
+        foreach my $attr (qw( kind size sha1 )) {
+            if ( $obj->can($attr) ) {
+                push @out,
+                  ( ' ' x ( $tabsize * $indent ) ) . $attr . ': ' . $obj->$attr;
+            }
+        }
+    }
+    elsif ($obj->isa('Git::PurePerl::NewDirectoryEntry')
+        or $obj->isa('Git::PurePerl::DirectoryEntry') )
+    {
+        foreach my $attr (qw( mode filename sha1 )) {
+            if ( $obj->can($attr) ) {
+                push @out,
+                  ( ' ' x ( $tabsize * $indent ) ) . $attr . ': ' . $obj->$attr;
+            }
+        }
+        push @out, $self->_debugtree( $obj->sha1, $indent + 1 );
+        return @out;
+    }
+    else {
+        die "Obj $obj doesn't seem to be supported";
+    }
+
+    if ( $obj->kind eq 'commit' ) {
+        foreach my $attr (
+            qw( tree_sha1 parent_sha1s author authored_time committer commited_time comment encoding )
+          )
+        {
+            if ( $obj->can($attr) ) {
+                push @out,
+                  ( ' ' x ( $tabsize * $indent ) ) . $attr . ': ' . $obj->$attr;
+            }
+        }
+        push @out, $self->_debugtree( $obj->tree, $indent + 1 );
+    }
+    elsif ( $obj->kind eq 'tree' ) {
+
+        push @out, ( ' ' x ( $tabsize * $indent ) ) . 'raw: ';
+        push @out, map {
+            chomp $_;
+            ( ' ' x ( $tabsize * $indent ) ) . $_
+        } hdump( $obj->kind . ' ' . $obj->size . "\0" . $obj->content );
+
+   #         my $sha1 = Digest::SHA1->new;
+   #         $sha1->add( $obj->kind . ' ' . $obj->size . "\0" . $obj->content );
+   #
+   #        push @out,
+   #              ( ' ' x ( $tabsize * $indent ) )
+   #              . 'my sha1: '. $sha1->hexdigest;
+
+        my $sha1a = Digest::SHA->new;
+        $sha1a->add( $obj->kind . ' ' . $obj->size . "\0" . $obj->content );
+
+        push @out,
+            ( ' ' x ( $tabsize * $indent ) )
+          . 'my sha1 from Digest::SHA: '
+          . $sha1a->hexdigest;
+
+        my @directory_entries = $obj->directory_entries;
+
+        foreach my $de (@directory_entries) {
+            push @out,
+              ( ' ' x ( $tabsize * $indent ) )
+              . 'Directory Entry: ';    # . $de->filename;
+
+            push @out, $self->_debugtree( $de, $indent + 1 );
+        }
+    }
+    elsif ( $obj->kind eq 'blob' ) {
+        push @out, ' ' x ( $tabsize * ($indent) ) . 'content: ';
+        push @out, ( ' ' x ( $tabsize * ( $indent + 1 ) ) )
+          . join(
+            "\n" . ( ' ' x ( $tabsize * ( $indent + 1 ) ) ),
+            split( /\n/, $obj->content )
+          );
+    }
+    else {
+        push @out,
+            ' ' x ( $tabsize * $indent )
+          . 'Dump object kind '
+          . $obj->kind
+          . ' not implemented';
+    }
+    return @out;
+
+}
+
+=head2 hdump
+
+Return hexdump of given data. 
+
+=cut
+
+sub hdump {
+    my $offset = 0;
+    my @out    = ();
+    my ( @array, $format );
+    foreach
+      my $data ( unpack( "a16" x ( length( $_[0] ) / 16 ) . "a*", $_[0] ) )
+    {
+        my ($len) = length($data);
+        if ( $len == 16 ) {
+            @array = unpack( 'N4', $data );
+            $format = "0x%08x (%05d)   %08x %08x %08x %08x   %s\n";
+        }
+        else {
+            @array = unpack( 'C*', $data );
+            $_ = sprintf "%2.2x", $_ for @array;
+            push( @array, '  ' ) while $len++ < 16;
+            $format =
+              "0x%08x (%05d)" . "   %s%s%s%s %s%s%s%s %s%s%s%s %s%s%s%s   %s\n";
+        }
+        $data =~ tr/\0-\37\177-\377/./;
+        push @out, sprintf $format, $offset, $offset, @array, $data;
+        $offset += 16;
+    }
+    return @out;
 }
 
 =head1 ACKNOWLEDGEMENTS
