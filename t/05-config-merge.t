@@ -3,20 +3,25 @@
 # This test script is for the optional external parsing of
 # configuration files using Config::Merge.
 #
+# If you're supporting Config::Merge in your app, be sure to look at the
+# semantics here. This implementation creates symlinks for keys that end
+# with an '@' symbol.
+#
 # vim: syntax=perl
 
 BEGIN {
+    use vars qw( $req_cm_err );
     eval 'require Config::Merge;';
-    our $req_cm_err = $@;
+    $req_cm_err = $@;
 }
 
-use Test::More tests => 6;
+use Test::More tests => 8;
 use DateTime;
 use Path::Class;
 use Data::Dumper;
 use Carp qw(confess);
 
-my $ver1 = 'd0866aa8d58568994849d6b7137c59dcdc42c927';
+my $ver1 = 'dbfc699b2bfaf60b0c62191d82a31bb57f75d282';
 
 my $gitdb = 't/05-config-merge.git';
 
@@ -24,22 +29,10 @@ dir($gitdb)->rmtree;
 
 package MyConfig;
 
-use base qw( Config::Versioned );
+use Moose;
+extends 'Config::Versioned';
+
 use Data::Dumper;
-
-sub new {
-    my ($this) = shift;
-    my $class = ref($this) || $this;
-    my $params = shift;
-
-    $params->{dbpath}      = $gitdb;
-    $params->{commit_time} = DateTime->from_epoch( epoch => 1240341682 );
-    $params->{author_name} = 'Test User';
-    $params->{author_mail} = 'test@example.com';
-
-    $this->SUPER::new($params);
-
-}
 
 sub parser {
     my $self     = shift;
@@ -65,7 +58,17 @@ sub cm2tree {
     if ( ref($cm) eq 'HASH' ) {
         my $ret = {};
         foreach my $key ( keys %{$cm} ) {
-            $ret->{$key} = $self->cm2tree( $cm->{$key} );
+
+            # If the key is appended with an '@' character, treat it
+            # as a symbolic link.
+            if ( $key =~ m/(.+)[@]$/ ) {
+                my $newkey = $1;
+                my $temp   = $self->cm2tree( $cm->{$key} );
+                $ret->{$newkey} = \$temp;
+            }
+            else {
+                $ret->{$key} = $self->cm2tree( $cm->{$key} );
+            }
         }
         return $ret;
     }
@@ -86,7 +89,15 @@ package main;
 
 SKIP: {
     skip "Config::Merge not installed", 5 if $req_cm_err;
-    my $cfg = MyConfig->new();
+    my $cfg = MyConfig->new(
+        {
+            dbpath      => $gitdb,
+            commit_time => DateTime->from_epoch( epoch => 1240341682 ),
+            author_name => 'Test User',
+            author_mail => 'test@example.com',
+            autocreate  => 1,
+        }
+    );
 
     ok( $cfg, 'created MyConfig instance' );
     is( $cfg->version, $ver1, 'check version of HEAD' );
@@ -102,9 +113,8 @@ SKIP: {
     );
 
     my @getlist = $cfg->get('db.hosts');
-    is_deeply(
-        \@getlist,
-        [ qw( 0 1 ) ],
-        'Check that get() returns array'
-    );
+    is_deeply( \@getlist, [qw( 0 1 )], 'Check that get() returns array' );
+    my $sym = $cfg->get('db.symgroup.sym1');
+    is( ref($sym), 'SCALAR', 'check value of symlink is anon ref to scalar' );
+    is( ${$sym}, 'conn1:new.location', 'check target of symlink' );
 }

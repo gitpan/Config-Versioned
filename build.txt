@@ -3,7 +3,13 @@ Your mileage may vary.
 
 Installing a test version locally
 
-  perl Makefile.PL PREFIX=$HOME/perllib && make test && make install
+  export PERL_LOCAL_LIB_ROOT="$HOME/perl5";
+  export PERL_MB_OPT="--install_base $HOME/perl5";
+  export PERL_MM_OPT="INSTALL_BASE=$HOME/perl5";
+  export PERL5LIB="$HOME/perl5/lib/perl5:$PERL5LIB";
+  export PATH="$HOME/perl5/bin:$PATH";
+
+  perl Makefile.PL && make test && make install
   make clean
 
 To create a new dist package
@@ -19,7 +25,13 @@ When done, run:
 
     or
 
-  make veryclean
+  make verycleangit 
+
+Using "git flow"
+
+    git flow release start 0.03
+    # bump release string in META.yml and lib/Config/Versioned.pm
+    make veryclean
 
 Pushing CPAN modules from Github to CPAN
 (from http://blog.usarundbrief.com/?p=36)

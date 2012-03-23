@@ -1,22 +1,24 @@
-## t/01-initdb.t
+## t/09-symlink.t
 ##
 ## Written 2011 by Scott Hardin for the OpenXPKI project
-## Copyright (C) 2010, 2011 by Scott T. Hardin
+## Copyright (C) 2010-12 by Scott T. Hardin
+##
+## This tests the support for symlinks in the git repository
 ##
 ## vim: syntax=perl
 
-use Test::More tests => 19;
+use Test::More tests => 27;
 
 use strict;
 use warnings;
-my $gittestdir = qw( t/01-initdb.git );
+my $gittestdir = qw( t/09-symlink.git );
 
-my $ver1 = '7dd8415a7e1cd131fba134c1da4c603ecf4974e2';
-my $ver2 = 'a573e9bbcaeed0be9329b25e2831a930f5b656ca';
-my $ver3 = '3b5047486706e55528a2684daef195bb4f9d0923';
+my $ver1 = '9b8d56e2c292af6d2ce37ac39abfed773aa114f4';
+my $ver2 = '590010b5bc646d5744a05c08543db0ff0c5f8b9e';
+my $ver3 = 'f222693846e602182b317d50730236542a77429e';
 
 BEGIN {
-    my $gittestdir = qw( t/01-initdb.git );
+    my $gittestdir = qw( t/09-symlink.git );
 
     # remove artifacts from previous run
     use Path::Class;
@@ -37,7 +39,7 @@ my $cfg = Config::Versioned->new(
         {
             dbpath      => $gittestdir,
             autocreate  => 1,
-            filename    => '01-initdb.conf',
+            filename    => '09-symlink.conf',
             path        => [qw( t )],
             commit_time => DateTime->from_epoch( epoch => 1240341682 ),
             author_name => 'Test User',
@@ -77,7 +79,7 @@ is( $cfg->get('group1.ldap1.uri'),
 
 $cfg->parser(
     {
-        filename    => '01-initdb-2.conf',
+        filename    => '09-symlink-2.conf',
         path        => [qw( t )],
         commit_time => DateTime->from_epoch( epoch => 1240351682 ),
         author_name => 'Test User',
@@ -88,7 +90,7 @@ is( $cfg->version, $ver2, 'check version of second commit' );
 
 $cfg->parser(
     {
-        filename    => '01-initdb-3.conf',
+        filename    => '09-symlink-3.conf',
         path        => [qw( t )],
         commit_time => DateTime->from_epoch( epoch => 1240361682 ),
         author_name => 'Test User',
@@ -109,4 +111,17 @@ is_deeply( \@attrlist, [ sort(qw( uri user password )) ], "check attr list" );
 
 is( $cfg->kind('group1.ldap1'), 'tree', 'kind() returns tree');
 is( $cfg->kind('group1.ldap1.user'), 'blob', 'kind() returns blob');
+
+my $sym = $cfg->get('groupsym.ldapsym2');
+is( ref($sym), 'SCALAR', 'check value of symlink is anon ref to scalar');
+is( ${$sym}, 'conns/c2', 'check target of symlink');
+my $sym3 = $cfg->get('groupsym.ldapsym3');
+is( ref($sym3), 'SCALAR', 'check value of symlink is anon ref to scalar');
+is( ${$sym3}, 'conns/c3', 'check target of symlink');
+my $sym4 = $cfg->get('groupsym.ldapsym4');
+is( ref($sym4), 'SCALAR', 'check value of symlink is anon ref to scalar');
+is( ${$sym4}, 'conns/c4', 'check target of symlink');
+my $sym5 = $cfg->get('groupsym.ldap@sym5');
+is( ref($sym5), 'SCALAR', 'check value of symlink is anon ref to scalar');
+is( ${$sym5}, 'conns/c5', 'check target of symlink');
 
