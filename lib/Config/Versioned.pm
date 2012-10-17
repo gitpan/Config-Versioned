@@ -17,13 +17,9 @@ use namespace::autoclean;
 
 Config::Versioned - Simple, versioned access to configuration data
 
-=head1 VERSION
-
-Version 0.6
-
 =cut
 
-our $VERSION = '0.6';
+our $VERSION = '0.11';
 
 use Carp;
 use Config::Std;
@@ -395,17 +391,13 @@ sub dumptree {
     # If no version hash was given, default to the HEAD of master
 
     if ( not $version ) {
-        if ( $cfg->all_sha1s->all ) {
-            my $master = $cfg->ref('refs/heads/master');
-            if ( not $master ) {
-                die "ERR: no master object found";
-            }
+        my $master = $self->_git()->ref('refs/heads/master');
+        if ( $master ) {
             $version = $master->sha1;
+        } else {
+            # if no sha1s are in repo, there's nothing to return
+            return;
         }
-        else {
-            return;    # if no sha1s are in repo, there's nothing to return
-        }
-
     }
 
     my $obj = $cfg->get_object($version);
@@ -483,6 +475,10 @@ sub version {
 Initializes the internal git repository used for storing the config
 values. 
 
+If the I<objects> directory in the C<dbpath> does not exist, an
+C<init()> on the C<Git::PurePerl> class is run. Otherwise, the 
+instance is initialized using the existing bare repository.
+
 On error, it returns C<undef> and the reason is in C<$@>.
 
 =cut
@@ -496,10 +492,12 @@ sub _init_repo {
     #        die "ERROR: dbpath not set";
     #    }
 
-    if ( not -d $self->dbpath() ) {
+    if ( not -d $self->dbpath() . '/objects' ) {
         if ( $self->filename() || $self->autocreate() ) {
-            if ( not dir( $self->dbpath() )->mkpath ) {
-                die 'Error creating directory ' . $self->dbpath() . ': ' . $!;
+            if ( not -d $self->dbpath() ) {
+                if ( not dir( $self->dbpath() )->mkpath ) {
+                    die 'Error creating directory ' . $self->dbpath() . ': ' . $!;
+                }
             }
             $git = Git::PurePerl->init( gitdir => $self->dbpath() );
         } else {
@@ -660,11 +658,8 @@ sub commit {
     my $parent = undef;
     my $master = undef;
 
-    if ( $self->_git()->all_sha1s->all ) {
-        $master = $self->_git()->ref('refs/heads/master');
-        if ( not $master ) {
-            die "ERR: no master object found";
-        }
+    $master = $self->_git()->ref('refs/heads/master');
+    if ( $master ) {
         $parent = $master->sha1;
     }
 
@@ -739,10 +734,18 @@ sub _hash2tree {
                 warn "# _hash2tree() adding subtree for $key\n";
             }
             my $subtree = $self->_hash2tree( $hash->{$key} );
+             
+            next unless($subtree);
+
+            my $local_key = $key;
+            if ( $] > 5.007 && utf8::is_utf8($local_key) ) {
+                utf8::downgrade($local_key);
+            }
+
             my $de      = Git::PurePerl::NewDirectoryEntry->new(
                 mode     => '40000',
-                filename => $key,
-                sha1     => $subtree->sha1,
+                filename => $local_key,
+                sha1     => $subtree->sha1(),
             );
             push @dir_entries, $de;
         }
@@ -756,25 +759,45 @@ sub _hash2tree {
               Git::PurePerl::NewObject::Blob->new(
                 content => ${ $hash->{$key} } );
             $self->_git()->put_object($obj);
+            my $local_key = $key;
+            if ( $] > 5.007 && utf8::is_utf8($local_key) ) {
+                utf8::downgrade($local_key);
+            }
             my $de = Git::PurePerl::NewDirectoryEntry->new(
                 mode     => '120000',     # symlink
-                filename => $key,
-                sha1     => $obj->sha1,
+                filename => $local_key,
+                sha1     => $obj->sha1(),
             );
             push @dir_entries, $de;
         }
-        else {
+        elsif ( defined $hash->{$key} ) {
             my $obj =
               Git::PurePerl::NewObject::Blob->new( content => $hash->{$key} );
+
+            my $local_key = $key;
+            if ( $] > 5.007 && utf8::is_utf8($local_key) ) {
+                utf8::downgrade($local_key);
+            }
+
+            warn "# created blob for '$key' with sha " . $obj->sha1() if $self->debug();
+            warn "#      '$key' utf8 flag: ", utf8::is_utf8($key) if $self->debug();
             $self->_git()->put_object($obj);
             my $de = Git::PurePerl::NewDirectoryEntry->new(
                 mode     => '100644',     # plain file
-                filename => $key,
-                sha1     => $obj->sha1,
+                filename => $local_key,
+                sha1     => $obj->sha1(),
             );
             push @dir_entries, $de;
+        } else {
+            warn "#  _hash2tree() value is undef for key $key\n";
         }
     }
+
+    if (!scalar @dir_entries) {
+        warn "# _hash2tree() nothing to push\n";
+        return undef;
+    }
+
     my $tree =
       Git::PurePerl::NewObject::Tree->new( directory_entries =>
           [ sort { $a->filename cmp $b->filename } @dir_entries ] );
@@ -846,15 +869,10 @@ sub _findobjx {
     # If no version hash was given, default to the HEAD of master
 
     if ( not $ver ) {
-        if ( $self->_git()->all_sha1s->all ) {
-            my $master = $self->_git()->ref('refs/heads/master');
-            if ( not $master ) {
-                die "ERR: no master object found";
-            }
+        my $master = $self->_git()->ref('refs/heads/master');
+        if ( $master ) {
             $ver = $master->sha1;
-        }
-        else {
-
+        } else {
             # if no sha1s are in repo, there's nothing to return
             return;
         }
@@ -1015,11 +1033,8 @@ sub _debugtree {
 
     # Soooo, let's see what we've been fed...
     if ( not $start ) {    # default to the HEAD of master
-        if ( $cfg->all_sha1s->all ) {
-            my $master = $cfg->ref('refs/heads/master');
-            if ( not $master ) {
-                die "ERR: no master object found";
-            }
+        my $master = $cfg->ref('refs/heads/master');
+        if ( $master ) {
             $obj = $cfg->get_object( $master->sha1 );
         }
         else {
